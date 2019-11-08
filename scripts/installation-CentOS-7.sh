@@ -35,10 +35,9 @@ CURRENT_IP=$(ip addr | grep 'state UP' -A2 | tail -n1 | awk '{print $2}' | cut -
 
 # Install core system packages
 yum -y -q install epel-release yum-utils
-yum -y -q install http://rpms.remirepo.net/enterprise/remi-release-7.rpm
-yum-config-manager --enable remi-php73 > /dev/null
-yum -y -q install git curl wget unzip policycoreutils-python php php-fpm php-common php-mbstring php-ldap php-tidy php-xml php-pecl-zip php-gd php-mysqlnd
-
+yum -y -q install https://centos7.iuscommunity.org/ius-release.rpm
+rpm -Uvh https://mirror.webtatic.com/yum/el7/webtatic-release.rpm
+yum -y -q install git curl wget unzip policycoreutils-python php72u php72u-fpm php72u-gd php72u-mbstring php72u-mysqlnd php72u-pdo php72u-tidy php72u-cli php72u-json php72u-xsl php72u-xml php72u-ldap php72u-common php72u-mcrypt php72u-curl php72u-tokenizer
 # Select web-server
 echo -e "\v"
 PS3='Please select your web-server: '
@@ -127,6 +126,15 @@ esac
 mysql --user root --password="$MYSQL_ROOT_PASS" --execute="CREATE DATABASE bookstack;"
 mysql --user root --password="$MYSQL_ROOT_PASS" --execute="CREATE USER 'bookstack'@'localhost' IDENTIFIED BY '$DB_PASS';"
 mysql --user root --password="$MYSQL_ROOT_PASS" --execute="GRANT ALL ON bookstack.* TO 'bookstack'@'localhost';FLUSH PRIVILEGES;"
+
+# PHP settup
+#This will prevent PHP from trying to execute parts of the path if the file that was passed in to process is not found.
+#This could be used by malicious users to execute arbitrary code
+grep -i "cgi.fix_pathinfo=0" /etc/php.ini > /dev/null
+if [ $? -ne 0 ]
+then
+sed -i "s/;cgi.fix_pathinfo=1/cgi.fix_pathinfo=0/g" /etc/php.ini
+fi
 
 # Download BookStack
 cd /var/www
@@ -219,6 +227,11 @@ EOL
 
            # Set up php-fpm
            sed -c -i "s/\(^ *SetHandler *\).*/\1\"proxy\:fcgi\:\/\/127\.0\.0\.1\:9000\"/" /etc/httpd/conf.d/php.conf
+	   sed -c -i "s/\(user *= *\).*/\1apache/" /etc/php-fpm.d/www.conf
+           sed -c -i "s/\(group *= *\).*/\1apache/" /etc/php-fpm.d/www.conf
+	   sed -i "s/;listen.owner = php-fpm/listen.owner = apache/" /etc/php-fpm.d/www.conf
+	   sed -i "s/;listen.group = php-fpm/listen.group = apache/" /etc/php-fpm.d/www.conf
+	   sed -i "s/;listen.mode = 0660/listen.mode = 0660/" /etc/php-fpm.d/www.conf
            systemctl enable php-fpm && systemctl start php-fpm
 
            # Start Apache2
@@ -232,6 +245,9 @@ EOL
            # Set up php-fpm
            sed -c -i "s/\(user *= *\).*/\1$WEBSERVER/" /etc/php-fpm.d/www.conf
            sed -c -i "s/\(group *= *\).*/\1$WEBSERVER/" /etc/php-fpm.d/www.conf
+	   sed -i "s/;listen.owner = php-fpm/listen.owner = $WEBSERVER/" /etc/php-fpm.d/www.conf
+	   sed -i "s/;listen.group = php-fpm/listen.group = $WEBSERVER/" /etc/php-fpm.d/www.conf
+	   sed -i "s/;listen.mode = 0660/listen.mode = 0660/" /etc/php-fpm.d/www.conf
            systemctl enable php-fpm && systemctl start php-fpm
            
            # Set up nginx
@@ -272,16 +288,60 @@ EOL
 esac
 
 # Config Firewalld
-if [[ "$(systemctl is-active firewalld)" == "active" ]]; then
-    echo -e "\nAdding firewalld service rule... "
-    firewall-cmd --add-service=http && firewall-cmd --permanent --add-service=http > /dev/null
-    firewall-cmd --reload > /dev/null
+read -p "Do you want to configure Firewalld ? [y/n] "  responseF
+if [ "$responseF" == "y" ]
+then
+	if [[ "$(systemctl is-active firewalld)" == "active" ]]; then
+	    echo -e "\nAdding firewalld service rule... "
+	    firewall-cmd --add-service=http && firewall-cmd --permanent --add-service=http > /dev/null
+	    firewall-cmd --reload > /dev/null
+	fi
+fi
+
+# Config LDAP
+read -p "Do you want to configure LDAP ? [y/n] "  responseL
+if [ "$responseL" == "y" ]
+then
+
+echo -e "\nEnter the address of your ldap server and press [ENTER]\n"
+        read LDAP_SERVER
+echo -e "\nEnter the DN of user and press [ENTER]\n"
+        read LDAP_BASE_DN
+echo -e "\nEnter the DN of your ldap and press [ENTER]\n Example: CN=account,OU=users,DC=contoso,DC=com"
+        read LDAP_DN
+echo -e "\nEnter the password of your ldap server and press [ENTER]\n"
+        read LDAP_PASS
+
+        cat <<EOL >> /var/www/bookstack/.env
+
+# Authentication method to use
+# Can be 'standard' or 'ldap'
+AUTH_METHOD=ldap
+
+# LDAP configuration
+LDAP_SERVER=$LDAP_SERVER
+LDAP_BASE_DN=$LDAP_BASE_DN
+LDAP_DN="$LDAP_DN"
+LDAP_PASS=$LDAP_PASS
+LDAP_USER_FILTER=(|(mail=${user})(sAMAccountName=${user}))
+LDAP_EMAIL_ATTRIBUTE=mail
+LDAP_VERSION=3
+
+EOL
+
+else
+        echo "you can add the configuration manually in /var/www/bookstack/.env"
 fi
 
 echo -e "\v"
 echo "#############################################################################"
 echo "Setup Finished, Your BookStack instance should now be installed."
-echo "You can login with the email 'admin@admin.com' and password of 'password'"
+if [ "$responseL" != "y" ]
+then
+	echo "You can login with the email 'admin@admin.com' and password of 'password'."
+else 
+	echo "You can login with your ldap username and password."
+fi
 echo -e "Database "$DATABASE" was installed with a root password: "$MYSQL_ROOT_PASS"."
 echo -e "Your web-server config file: /etc/"$WEBSERVER"/conf.d/bookstack.conf"
 echo ""
